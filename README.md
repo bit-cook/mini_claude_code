@@ -10,7 +10,7 @@
 
 A progressive tutorial that demystifies AI coding agents like Claude Code, Cursor Agent, and Codex CLI.
 
-**4 versions, ~1000 lines total, each adding one concept:**
+**5 versions, ~1100 lines total, each adding one concept:**
 
 | Version | Lines | What it adds | Core insight |
 |---------|-------|--------------|--------------|
@@ -18,6 +18,7 @@ A progressive tutorial that demystifies AI coding agents like Claude Code, Curso
 | [v1](./v1_basic_agent.py) | ~200 | 4 core tools | Model as Agent |
 | [v2](./v2_todo_agent.py) | ~300 | Todo tracking | Explicit planning |
 | [v3](./v3_subagent.py) | ~450 | Subagents | Divide and conquer |
+| [v4](./v4_skills_agent.py) | ~550 | Skills | Domain expertise on-demand |
 
 ## Quick Start
 
@@ -29,6 +30,7 @@ python v0_bash_agent.py  # Minimal
 python v1_basic_agent.py # Core agent loop
 python v2_todo_agent.py  # + Todo planning
 python v3_subagent.py    # + Subagents
+python v4_skills_agent.py # + Skills
 ```
 
 ## The Core Pattern
@@ -55,6 +57,8 @@ mini-claude-code/
 ├── v1_basic_agent.py      # ~200 lines: 4 tools, core loop
 ├── v2_todo_agent.py       # ~300 lines: + TodoManager
 ├── v3_subagent.py         # ~450 lines: + Task tool, agent registry
+├── v4_skills_agent.py     # ~550 lines: + Skill tool, SkillLoader
+├── skills/                # Example skills (pdf, mcp-builder, code-review)
 └── docs/                  # Detailed explanations (EN + ZH)
 ```
 
@@ -72,6 +76,9 @@ Todo tool makes plans explicit. Constraints enable complex tasks.
 ### v3: Subagent Mechanism
 Task tool spawns isolated child agents. Context stays clean.
 
+### v4: Skills Mechanism
+SKILL.md files provide domain expertise on-demand. Knowledge as a first-class citizen.
+
 ## Deep Dives
 
 **Technical tutorials (docs/):**
@@ -82,9 +89,11 @@ Task tool spawns isolated child agents. Context stays clean.
 | [v1: Model as Agent](./docs/v1-model-as-agent.md) | [v1: 模型即代理](./docs/v1-模型即代理.md) |
 | [v2: Structured Planning](./docs/v2-structured-planning.md) | [v2: 结构化规划](./docs/v2-结构化规划.md) |
 | [v3: Subagent Mechanism](./docs/v3-subagent-mechanism.md) | [v3: 子代理机制](./docs/v3-子代理机制.md) |
+| [v4: Skills Mechanism](./docs/v4-skills-mechanism.md) | [v4: Skills 机制](./docs/v4-Skills机制.md) |
 
 **Original articles (articles/) - Chinese only, social media style:**
-- [v0文章](./articles/v0文章.md) | [v1文章](./articles/v1文章.md) | [v2文章](./articles/v2文章.md) | [v3文章](./articles/v3文章.md)
+- [v0文章](./articles/v0文章.md) | [v1文章](./articles/v1文章.md) | [v2文章](./articles/v2文章.md) | [v3文章](./articles/v3文章.md) | [v4文章](./articles/v4文章.md)
+- [上下文缓存经济学](./articles/上下文缓存经济学.md) - Context Caching Economics for Agent Developers
 
 ## Production Version
 

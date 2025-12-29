@@ -1,79 +1,84 @@
 #!/usr/bin/env python3
 """
-v3_subagent.py - Mini Claude Code: Subagent Mechanism (~450 lines)
+v4_skills_agent.py - Mini Claude Code: Skills Mechanism (~550 lines)
 
-Core Philosophy: "Divide and Conquer with Context Isolation"
-=============================================================
-v2 adds planning. But for large tasks like "explore the codebase then
-refactor auth", a single agent hits problems:
+Core Philosophy: "Knowledge Externalization"
+============================================
+v3 gave us subagents for task decomposition. But there's a deeper question:
 
-The Problem - Context Pollution:
--------------------------------
-    Single-Agent History:
-      [exploring...] cat file1.py -> 500 lines
-      [exploring...] cat file2.py -> 300 lines
-      ... 15 more files ...
-      [now refactoring...] "Wait, what did file1 contain?"
+    How does the model know HOW to handle domain-specific tasks?
 
-The model's context fills with exploration details, leaving little room
-for the actual task. This is "context pollution".
+- Processing PDFs? It needs to know pdftotext vs PyMuPDF
+- Building MCP servers? It needs protocol specs and best practices
+- Code review? It needs a systematic checklist
 
-The Solution - Subagents with Isolated Context:
-----------------------------------------------
-    Main Agent History:
-      [Task: explore codebase]
-        -> Subagent explores 20 files (in its own context)
-        -> Returns ONLY: "Auth in src/auth/, DB in src/models/"
-      [now refactoring with clean context]
+This knowledge isn't a tool - it's EXPERTISE. Skills solve this by letting
+the model load domain knowledge on-demand.
 
-Each subagent has:
-  1. Its own fresh message history
-  2. Filtered tools (explore can't write)
-  3. Specialized system prompt
-  4. Returns only final summary to parent
+The Paradigm Shift: Knowledge Externalization
+--------------------------------------------
+Traditional AI: Knowledge locked in model parameters
+  - To teach new skills: collect data -> train -> deploy
+  - Cost: $10K-$1M+, Timeline: Weeks
+  - Requires ML expertise, GPU clusters
 
-The Key Insight:
+Skills: Knowledge stored in editable files
+  - To teach new skills: write a SKILL.md file
+  - Cost: Free, Timeline: Minutes
+  - Anyone can do it
+
+It's like attaching a hot-swappable LoRA adapter without any training!
+
+Tools vs Skills:
 ---------------
-    Process isolation = Context isolation
+    | Concept   | What it is              | Example                    |
+    |-----------|-------------------------|---------------------------|
+    | **Tool**  | What model CAN do       | bash, read_file, write    |
+    | **Skill** | How model KNOWS to do   | PDF processing, MCP dev   |
 
-By spawning subtasks, we get:
-  - Clean context for the main agent
-  - Parallel exploration possible
-  - Natural task decomposition
-  - Same agent loop, different contexts
+Tools are capabilities. Skills are knowledge.
 
-Agent Type Registry:
--------------------
-    | Type    | Tools               | Purpose                     |
-    |---------|---------------------|---------------------------- |
-    | explore | bash, read_file     | Read-only exploration       |
-    | code    | all tools           | Full implementation access  |
-    | plan    | bash, read_file     | Design without modifying    |
+Progressive Disclosure:
+----------------------
+    Layer 1: Metadata (always loaded)      ~100 tokens/skill
+             name + description only
 
-Typical Flow:
--------------
-    User: "Refactor auth to use JWT"
+    Layer 2: SKILL.md body (on trigger)    ~2000 tokens
+             Detailed instructions
 
-    Main Agent:
-      1. Task(explore): "Find all auth-related files"
-         -> Subagent reads 10 files
-         -> Returns: "Auth in src/auth/login.py..."
+    Layer 3: Resources (as needed)         Unlimited
+             scripts/, references/, assets/
 
-      2. Task(plan): "Design JWT migration"
-         -> Subagent analyzes structure
-         -> Returns: "1. Add jwt lib 2. Create utils..."
+This keeps context lean while allowing arbitrary depth.
 
-      3. Task(code): "Implement JWT tokens"
-         -> Subagent writes code
-         -> Returns: "Created jwt_utils.py, updated login.py"
+SKILL.md Standard:
+-----------------
+    skills/
+    |-- pdf/
+    |   |-- SKILL.md          # Required: YAML frontmatter + Markdown body
+    |-- mcp-builder/
+    |   |-- SKILL.md
+    |   |-- references/       # Optional: docs, specs
+    |-- code-review/
+        |-- SKILL.md
+        |-- scripts/          # Optional: helper scripts
 
-      4. Summarize changes to user
+Cache-Preserving Injection:
+--------------------------
+Critical insight: Skill content goes into tool_result (user message),
+NOT system prompt. This preserves prompt cache!
+
+    Wrong: Edit system prompt each time (cache invalidated, 20-50x cost)
+    Right: Append skill as tool result (prefix unchanged, cache hit)
+
+This is how production Claude Code works - and why it's cost-efficient.
 
 Usage:
-    python v3_subagent.py
+    python v4_skills_agent.py
 """
 
 import os
+import re
 import subprocess
 import sys
 import time
@@ -97,43 +102,191 @@ API_KEY = os.getenv("ANTHROPIC_API_KEY")
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL")
 MODEL = os.getenv("MODEL_NAME", "claude-sonnet-4-20250514")
 WORKDIR = Path.cwd()
+SKILLS_DIR = WORKDIR / "skills"
 
 client = Anthropic(api_key=API_KEY, base_url=BASE_URL) if BASE_URL else Anthropic(api_key=API_KEY)
 
 
 # =============================================================================
-# Agent Type Registry - The core of subagent mechanism
+# SkillLoader - The core addition in v4
+# =============================================================================
+
+class SkillLoader:
+    """
+    Loads and manages skills from SKILL.md files.
+
+    A skill is a FOLDER containing:
+    - SKILL.md (required): YAML frontmatter + markdown instructions
+    - scripts/ (optional): Helper scripts the model can run
+    - references/ (optional): Additional documentation
+    - assets/ (optional): Templates, files for output
+
+    SKILL.md Format:
+    ----------------
+        ---
+        name: pdf
+        description: Process PDF files. Use when reading, creating, or merging PDFs.
+        ---
+
+        # PDF Processing Skill
+
+        ## Reading PDFs
+
+        Use pdftotext for quick extraction:
+        ```bash
+        pdftotext input.pdf -
+        ```
+        ...
+
+    The YAML frontmatter provides metadata (name, description).
+    The markdown body provides detailed instructions.
+    """
+
+    def __init__(self, skills_dir: Path):
+        self.skills_dir = skills_dir
+        self.skills = {}
+        self.load_skills()
+
+    def parse_skill_md(self, path: Path) -> dict:
+        """
+        Parse a SKILL.md file into metadata and body.
+
+        Returns dict with: name, description, body, path, dir
+        Returns None if file doesn't match format.
+        """
+        content = path.read_text()
+
+        # Match YAML frontmatter between --- markers
+        match = re.match(r"^---\s*\n(.*?)\n---\s*\n(.*)$", content, re.DOTALL)
+        if not match:
+            return None
+
+        frontmatter, body = match.groups()
+
+        # Parse YAML-like frontmatter (simple key: value)
+        metadata = {}
+        for line in frontmatter.strip().split("\n"):
+            if ":" in line:
+                key, value = line.split(":", 1)
+                metadata[key.strip()] = value.strip().strip("\"'")
+
+        # Require name and description
+        if "name" not in metadata or "description" not in metadata:
+            return None
+
+        return {
+            "name": metadata["name"],
+            "description": metadata["description"],
+            "body": body.strip(),
+            "path": path,
+            "dir": path.parent,
+        }
+
+    def load_skills(self):
+        """
+        Scan skills directory and load all valid SKILL.md files.
+
+        Only loads metadata at startup - body is loaded on-demand.
+        This keeps the initial context lean.
+        """
+        if not self.skills_dir.exists():
+            return
+
+        for skill_dir in self.skills_dir.iterdir():
+            if not skill_dir.is_dir():
+                continue
+
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.exists():
+                continue
+
+            skill = self.parse_skill_md(skill_md)
+            if skill:
+                self.skills[skill["name"]] = skill
+
+    def get_descriptions(self) -> str:
+        """
+        Generate skill descriptions for system prompt.
+
+        This is Layer 1 - only name and description, ~100 tokens per skill.
+        Full content (Layer 2) is loaded only when Skill tool is called.
+        """
+        if not self.skills:
+            return "(no skills available)"
+
+        return "\n".join(
+            f"- {name}: {skill['description']}"
+            for name, skill in self.skills.items()
+        )
+
+    def get_skill_content(self, name: str) -> str:
+        """
+        Get full skill content for injection.
+
+        This is Layer 2 - the complete SKILL.md body, plus any available
+        resources (Layer 3 hints).
+
+        Returns None if skill not found.
+        """
+        if name not in self.skills:
+            return None
+
+        skill = self.skills[name]
+        content = f"# Skill: {skill['name']}\n\n{skill['body']}"
+
+        # List available resources (Layer 3 hints)
+        resources = []
+        for folder, label in [
+            ("scripts", "Scripts"),
+            ("references", "References"),
+            ("assets", "Assets")
+        ]:
+            folder_path = skill["dir"] / folder
+            if folder_path.exists():
+                files = list(folder_path.glob("*"))
+                if files:
+                    resources.append(f"{label}: {', '.join(f.name for f in files)}")
+
+        if resources:
+            content += f"\n\n**Available resources in {skill['dir']}:**\n"
+            content += "\n".join(f"- {r}" for r in resources)
+
+        return content
+
+    def list_skills(self) -> list:
+        """Return list of available skill names."""
+        return list(self.skills.keys())
+
+
+# Global skill loader instance
+SKILLS = SkillLoader(SKILLS_DIR)
+
+
+# =============================================================================
+# Agent Type Registry (from v3)
 # =============================================================================
 
 AGENT_TYPES = {
-    # Explore: Read-only agent for searching and analyzing
-    # Cannot modify files - safe for broad exploration
     "explore": {
         "description": "Read-only agent for exploring code, finding files, searching",
-        "tools": ["bash", "read_file"],  # No write access
+        "tools": ["bash", "read_file"],
         "prompt": "You are an exploration agent. Search and analyze, but never modify files. Return a concise summary.",
     },
-
-    # Code: Full-powered agent for implementation
-    # Has all tools - use for actual coding work
     "code": {
         "description": "Full agent for implementing features and fixing bugs",
-        "tools": "*",  # All tools
+        "tools": "*",
         "prompt": "You are a coding agent. Implement the requested changes efficiently.",
     },
-
-    # Plan: Analysis agent for design work
-    # Read-only, focused on producing plans and strategies
     "plan": {
         "description": "Planning agent for designing implementation strategies",
-        "tools": ["bash", "read_file"],  # Read-only
+        "tools": ["bash", "read_file"],
         "prompt": "You are a planning agent. Analyze the codebase and output a numbered implementation plan. Do NOT make changes.",
     },
 }
 
 
 def get_agent_descriptions() -> str:
-    """Generate agent type descriptions for the Task tool."""
+    """Generate agent type descriptions for system prompt."""
     return "\n".join(
         f"- {name}: {cfg['description']}"
         for name, cfg in AGENT_TYPES.items()
@@ -141,7 +294,7 @@ def get_agent_descriptions() -> str:
 
 
 # =============================================================================
-# TodoManager (from v2, unchanged)
+# TodoManager (from v2)
 # =============================================================================
 
 class TodoManager:
@@ -194,25 +347,29 @@ TODO = TodoManager()
 
 
 # =============================================================================
-# System Prompt
+# System Prompt - Updated for v4
 # =============================================================================
 
 SYSTEM = f"""You are a coding agent at {WORKDIR}.
 
 Loop: plan -> act with tools -> report.
 
-You can spawn subagents for complex subtasks:
+**Skills available** (invoke with Skill tool when task matches):
+{SKILLS.get_descriptions()}
+
+**Subagents available** (invoke with Task tool for focused subtasks):
 {get_agent_descriptions()}
 
 Rules:
-- Use Task tool for subtasks that need focused exploration or implementation
+- Use Skill tool IMMEDIATELY when a task matches a skill description
+- Use Task tool for subtasks needing focused exploration or implementation
 - Use TodoWrite to track multi-step work
 - Prefer tools over prose. Act, don't just explain.
 - After finishing, summarize what changed."""
 
 
 # =============================================================================
-# Base Tool Definitions
+# Tool Definitions
 # =============================================================================
 
 BASE_TOOLS = [
@@ -289,32 +446,16 @@ BASE_TOOLS = [
     },
 ]
 
-
-# =============================================================================
-# Task Tool - The core addition in v3
-# =============================================================================
-
+# Task tool (from v3)
 TASK_TOOL = {
     "name": "Task",
-    "description": f"""Spawn a subagent for a focused subtask.
-
-Subagents run in ISOLATED context - they don't see parent's history.
-Use this to keep the main conversation clean.
-
-Agent types:
-{get_agent_descriptions()}
-
-Example uses:
-- Task(explore): "Find all files using the auth module"
-- Task(plan): "Design a migration strategy for the database"
-- Task(code): "Implement the user registration form"
-""",
+    "description": f"Spawn a subagent for a focused subtask.\n\nAgent types:\n{get_agent_descriptions()}",
     "input_schema": {
         "type": "object",
         "properties": {
             "description": {
                 "type": "string",
-                "description": "Short task name (3-5 words) for progress display"
+                "description": "Short task description (3-5 words)"
             },
             "prompt": {
                 "type": "string",
@@ -322,30 +463,47 @@ Example uses:
             },
             "agent_type": {
                 "type": "string",
-                "enum": list(AGENT_TYPES.keys()),
-                "description": "Type of agent to spawn"
+                "enum": list(AGENT_TYPES.keys())
             },
         },
         "required": ["description", "prompt", "agent_type"],
     },
 }
 
-# Main agent gets all tools including Task
-ALL_TOOLS = BASE_TOOLS + [TASK_TOOL]
+# NEW in v4: Skill tool
+SKILL_TOOL = {
+    "name": "Skill",
+    "description": f"""Load a skill to gain specialized knowledge for a task.
+
+Available skills:
+{SKILLS.get_descriptions()}
+
+When to use:
+- IMMEDIATELY when user task matches a skill description
+- Before attempting domain-specific work (PDF, MCP, etc.)
+
+The skill content will be injected into the conversation, giving you
+detailed instructions and access to resources.""",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "skill": {
+                "type": "string",
+                "description": "Name of the skill to load"
+            }
+        },
+        "required": ["skill"],
+    },
+}
+
+ALL_TOOLS = BASE_TOOLS + [TASK_TOOL, SKILL_TOOL]
 
 
 def get_tools_for_agent(agent_type: str) -> list:
-    """
-    Filter tools based on agent type.
-
-    Each agent type has a whitelist of allowed tools.
-    '*' means all tools (but subagents don't get Task to prevent infinite recursion).
-    """
+    """Filter tools based on agent type."""
     allowed = AGENT_TYPES.get(agent_type, {}).get("tools", "*")
-
     if allowed == "*":
-        return BASE_TOOLS  # All base tools, but NOT Task (no recursion in demo)
-
+        return BASE_TOOLS
     return [t for t in BASE_TOOLS if t["name"] in allowed]
 
 
@@ -362,7 +520,7 @@ def safe_path(p: str) -> Path:
 
 
 def run_bash(cmd: str) -> str:
-    """Execute shell command with safety checks."""
+    """Execute shell command."""
     if any(d in cmd for d in ["rm -rf /", "sudo", "shutdown"]):
         return "Error: Dangerous command"
     try:
@@ -418,56 +576,55 @@ def run_todo(items: list) -> str:
         return f"Error: {e}"
 
 
-# =============================================================================
-# Subagent Execution - The heart of v3
-# =============================================================================
+def run_skill(skill_name: str) -> str:
+    """
+    Load a skill and inject it into the conversation.
+
+    This is the key mechanism:
+    1. Get skill content (SKILL.md body + resource hints)
+    2. Return it wrapped in <skill-loaded> tags
+    3. Model receives this as tool_result (user message)
+    4. Model now "knows" how to do the task
+
+    Why tool_result instead of system prompt?
+    - System prompt changes invalidate cache (20-50x cost increase)
+    - Tool results append to end (prefix unchanged, cache hit)
+
+    This is how production systems stay cost-efficient.
+    """
+    content = SKILLS.get_skill_content(skill_name)
+
+    if content is None:
+        available = ", ".join(SKILLS.list_skills()) or "none"
+        return f"Error: Unknown skill '{skill_name}'. Available: {available}"
+
+    # Wrap in tags so model knows it's skill content
+    return f"""<skill-loaded name="{skill_name}">
+{content}
+</skill-loaded>
+
+Follow the instructions in the skill above to complete the user's task."""
+
 
 def run_task(description: str, prompt: str, agent_type: str) -> str:
-    """
-    Execute a subagent task with isolated context.
-
-    This is the core of the subagent mechanism:
-
-    1. Create isolated message history (KEY: no parent context!)
-    2. Use agent-specific system prompt
-    3. Filter available tools based on agent type
-    4. Run the same query loop as main agent
-    5. Return ONLY the final text (not intermediate details)
-
-    The parent agent sees just the summary, keeping its context clean.
-
-    Progress Display:
-    ----------------
-    While running, we show:
-      [explore] find auth files ... 5 tools, 3.2s
-
-    This gives visibility without polluting the main conversation.
-    """
+    """Execute a subagent task (from v3). See v3 for details."""
     if agent_type not in AGENT_TYPES:
         return f"Error: Unknown agent type '{agent_type}'"
 
     config = AGENT_TYPES[agent_type]
-
-    # Agent-specific system prompt
     sub_system = f"""You are a {agent_type} subagent at {WORKDIR}.
 
 {config["prompt"]}
 
 Complete the task and return a clear, concise summary."""
 
-    # Filtered tools for this agent type
     sub_tools = get_tools_for_agent(agent_type)
-
-    # ISOLATED message history - this is the key!
-    # The subagent starts fresh, doesn't see parent's conversation
     sub_messages = [{"role": "user", "content": prompt}]
 
-    # Progress tracking
     print(f"  [{agent_type}] {description}")
     start = time.time()
     tool_count = 0
 
-    # Run the same agent loop (silently - don't print to main chat)
     while True:
         response = client.messages.create(
             model=MODEL,
@@ -492,7 +649,6 @@ Complete the task and return a clear, concise summary."""
                 "content": output
             })
 
-            # Update progress line (in-place)
             elapsed = time.time() - start
             sys.stdout.write(
                 f"\r  [{agent_type}] {description} ... {tool_count} tools, {elapsed:.1f}s"
@@ -502,14 +658,11 @@ Complete the task and return a clear, concise summary."""
         sub_messages.append({"role": "assistant", "content": response.content})
         sub_messages.append({"role": "user", "content": results})
 
-    # Final progress update
     elapsed = time.time() - start
     sys.stdout.write(
         f"\r  [{agent_type}] {description} - done ({tool_count} tools, {elapsed:.1f}s)\n"
     )
 
-    # Extract and return only the final text
-    # This is what the parent agent sees - a clean summary
     for block in response.content:
         if hasattr(block, "text"):
             return block.text
@@ -531,6 +684,8 @@ def execute_tool(name: str, args: dict) -> str:
         return run_todo(args["items"])
     if name == "Task":
         return run_task(args["description"], args["prompt"], args["agent_type"])
+    if name == "Skill":
+        return run_skill(args["skill"])
     return f"Unknown tool: {name}"
 
 
@@ -540,10 +695,10 @@ def execute_tool(name: str, args: dict) -> str:
 
 def agent_loop(messages: list) -> list:
     """
-    Main agent loop with subagent support.
+    Main agent loop with skills support.
 
-    Same pattern as v1/v2, but now includes the Task tool.
-    When model calls Task, it spawns a subagent with isolated context.
+    Same pattern as v3, but now with Skill tool.
+    When model loads a skill, it receives domain knowledge.
     """
     while True:
         response = client.messages.create(
@@ -567,16 +722,20 @@ def agent_loop(messages: list) -> list:
 
         results = []
         for tc in tool_calls:
-            # Task tool has special display handling
+            # Special display for different tool types
             if tc.name == "Task":
                 print(f"\n> Task: {tc.input.get('description', 'subtask')}")
+            elif tc.name == "Skill":
+                print(f"\n> Loading skill: {tc.input.get('skill', '?')}")
             else:
                 print(f"\n> {tc.name}")
 
             output = execute_tool(tc.name, tc.input)
 
-            # Don't print full Task output (it manages its own display)
-            if tc.name != "Task":
+            # Skill tool shows summary, not full content
+            if tc.name == "Skill":
+                print(f"  Skill loaded ({len(output)} chars)")
+            elif tc.name != "Task":
                 preview = output[:200] + "..." if len(output) > 200 else output
                 print(f"  {preview}")
 
@@ -595,7 +754,8 @@ def agent_loop(messages: list) -> list:
 # =============================================================================
 
 def main():
-    print(f"Mini Claude Code v3 (with Subagents) - {WORKDIR}")
+    print(f"Mini Claude Code v4 (with Skills) - {WORKDIR}")
+    print(f"Skills: {', '.join(SKILLS.list_skills()) or 'none'}")
     print(f"Agent types: {', '.join(AGENT_TYPES.keys())}")
     print("Type 'exit' to quit.\n")
 

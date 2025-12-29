@@ -10,7 +10,7 @@
 
 一个渐进式教程，揭开 Claude Code、Cursor Agent、Codex CLI 等 AI 编程 Agent 的神秘面纱。
 
-**4 个版本，总共约 1000 行，每个版本只添加一个概念：**
+**5 个版本，总共约 1100 行，每个版本只添加一个概念：**
 
 | 版本 | 行数 | 新增内容 | 核心洞察 |
 |------|------|---------|---------|
@@ -18,6 +18,7 @@
 | [v1](./v1_basic_agent.py) | ~200 | 4 个核心工具 | 模型即代理 |
 | [v2](./v2_todo_agent.py) | ~300 | Todo 追踪 | 显式规划 |
 | [v3](./v3_subagent.py) | ~450 | 子代理 | 分而治之 |
+| [v4](./v4_skills_agent.py) | ~550 | Skills | 按需领域专业 |
 
 ## 快速开始
 
@@ -29,6 +30,7 @@ python v0_bash_agent.py  # 极简版
 python v1_basic_agent.py # 核心 Agent 循环
 python v2_todo_agent.py  # + Todo 规划
 python v3_subagent.py    # + 子代理
+python v4_skills_agent.py # + Skills
 ```
 
 ## 核心模式
@@ -55,6 +57,8 @@ mini-claude-code/
 ├── v1_basic_agent.py      # ~200 行: 4 个工具，核心循环
 ├── v2_todo_agent.py       # ~300 行: + TodoManager
 ├── v3_subagent.py         # ~450 行: + Task 工具，代理注册表
+├── v4_skills_agent.py     # ~550 行: + Skill 工具，SkillLoader
+├── skills/                # 示例 Skills (pdf, mcp-builder, code-review)
 └── docs/                  # 详细文档 (中英双语)
 ```
 
@@ -72,6 +76,9 @@ Todo 工具让计划显式化。约束赋能复杂任务。
 ### v3: 子代理机制
 Task 工具生成隔离的子代理。上下文保持干净。
 
+### v4: Skills 机制
+SKILL.md 文件按需提供领域专业知识。知识作为一等公民。
+
 ## 深入阅读
 
 **技术教程 (docs/):**
@@ -82,9 +89,11 @@ Task 工具生成隔离的子代理。上下文保持干净。
 | [v1: Model as Agent](./docs/v1-model-as-agent.md) | [v1: 模型即代理](./docs/v1-模型即代理.md) |
 | [v2: Structured Planning](./docs/v2-structured-planning.md) | [v2: 结构化规划](./docs/v2-结构化规划.md) |
 | [v3: Subagent Mechanism](./docs/v3-subagent-mechanism.md) | [v3: 子代理机制](./docs/v3-子代理机制.md) |
+| [v4: Skills Mechanism](./docs/v4-skills-mechanism.md) | [v4: Skills 机制](./docs/v4-Skills机制.md) |
 
 **原创文章 (articles/) - 公众号风格:**
-- [v0文章](./articles/v0文章.md) | [v1文章](./articles/v1文章.md) | [v2文章](./articles/v2文章.md) | [v3文章](./articles/v3文章.md)
+- [v0文章](./articles/v0文章.md) | [v1文章](./articles/v1文章.md) | [v2文章](./articles/v2文章.md) | [v3文章](./articles/v3文章.md) | [v4文章](./articles/v4文章.md)
+- [上下文缓存经济学](./articles/上下文缓存经济学.md) - Agent 开发者必知的成本优化指南
 
 ## 生产版本
 
